@@ -542,7 +542,7 @@ layout3= [[sg.Text('Callsign', size=(10,1)),sg.Input(config['mycall'],key='cCall
 tabgrp = [[sg.TabGroup([[sg.Tab('Receive', layout1), sg.Tab('Transmit', layout2), sg.Tab('Config', layout3)]], key='tabs', enable_events=True)]]  
         
 #Define Window
-window =sg.Window(config['version'],tabgrp, icon="icon.png")
+window =sg.Window(config['version'],tabgrp, icon="pyamp.png")
 
 def update_rTabFromListBox(hash_file_name): 
 	file_name = file_hash = date_time_string = desc = call_info = num_bytes = num_blocks = block_size = missing_blocks = ''
