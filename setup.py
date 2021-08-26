@@ -12,7 +12,7 @@ setuptools.setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/dB-SPL/pyAMP",
-	keywords=['flamp', fldigi', 'Python', 'Opensource'],
+	keywords=['flamp', 'fldigi', 'Python', 'Opensource'],
     packages=setuptools.find_packages(),
 	install_requires=[
 		'crcmod',
