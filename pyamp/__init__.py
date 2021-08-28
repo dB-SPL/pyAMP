@@ -11,8 +11,10 @@ from os import path
 from os import mkdir
 from os import stat
 
-fldigi = pyfldigi.client.Client()
+fldigi = pyfldigi.Client()
 rxdata = b''
+rx_counter = int(0)
+fox_counter = int(0)
 requested_blocks = []
 
 script_dir = getcwd()
@@ -65,11 +67,10 @@ def checksum(data):
 	crc16 = crcmod.mkCrcFun(0x18005, 0xffff, True)
 	
 	if type(data) == str:
-		crc = str(hex(crc16(data.encode()))).upper()[-4:]
-	
+		crc = '{0:0{1}X}'.format(crc16(data.encode()),4)
+
 	if type(data) == bytes:
-		crc = str(hex(crc16(data))).upper()[-4:]
-	
+		crc = '{0:0{1}X}'.format(crc16(data),4)
 	return crc        
 
 def k2sToBase64(file_path):
@@ -141,6 +142,8 @@ def parse_block(string):
 
 
 def add_proto_block(keyword, file_hash, block):
+	global files
+	print('Adding ' + keyword + ' block')
 	hash_found = False
 	if keyword == 'PROG':
 		for file_name in files:
@@ -199,13 +202,13 @@ def add_proto_block(keyword, file_hash, block):
 					existing_data = files[file_name]['data'].pop(data_format)	
 				files[file_name]['data'][data_format] = {}
 				for blk_num in range(1,num_blocks + 1):
-					if 'data' in files[file_name]['hash'][file_hash]:
+					files[file_name]['data'][data_format][blk_num] = b''
+					if blk_num in existing_data:
+						files[file_name]['data'][data_format][blk_num] = existing_data[blk_num]
+					elif 'data' in files[file_name]['hash'][file_hash]:
 						if blk_num in files[file_name]['hash'][file_hash]['data']:
 							files[file_name]['data'][data_format][blk_num] = files[file_name]['hash'][file_hash]['data'].pop(blk_num)
-					elif blk_num in existing_data:
-						files[file_name]['data'][data_format][blk_num] = existing_data[blk_num]
-					else:
-						files[file_name]['data'][data_format][blk_num] = b''
+						
 	if keyword == 'SIZE':
 		hash_found = False
 		block_content = block.split(' ')
@@ -229,13 +232,13 @@ def add_proto_block(keyword, file_hash, block):
 							existing_data = files[file_name]['data'].pop(data_format)	
 						files[file_name]['data'][data_format] = {}
 						for blk_num in range(1,num_blocks + 1):
-							if 'data' in files[file_name]['hash'][file_hash]:
+							files[file_name]['data'][data_format][blk_num] = b''
+							if blk_num in existing_data:
+								files[file_name]['data'][data_format][blk_num] = existing_data[blk_num]
+							elif 'data' in files[file_name]['hash'][file_hash]:
 								if blk_num in files[file_name]['hash'][file_hash]['data']:
 									files[file_name]['data'][data_format][blk_num] = files[file_name]['hash'][file_hash]['data'].pop(blk_num)
-							elif blk_num in existing_data:
-								files[file_name]['data'][data_format][blk_num] = existing_data[blk_num]
-							else:
-								files[file_name]['data'][data_format][blk_num] = b''
+							
 		if hash_found == True: fileListUpdated = True
 		if hash_found == False:
 			if 'unknown' not in files:
@@ -439,7 +442,10 @@ def search_rx_for_block(rx_bytes, add_block=True):
 			if line_len == '':
 				start_pos = -1
 				break
-			line_len = int(line_len)
+			if line_len.isdecimal():
+				line_len = int(line_len)
+			else:
+				return [start_pos, start_pos + 3, 'checksum_error', '', '']
 			chunk = chunk[pos + 1:]
 			check = chunk[:4].decode()
 			chunk = chunk[5:][:line_len]
@@ -474,6 +480,7 @@ def search_rx_for_block(rx_bytes, add_block=True):
 		return -1
 	
 def check_for_rx(rx_bytes):
+	global fldigi
 	new_rx_bytes = fldigi.text.get_rx_data()
 	if new_rx_bytes != b'':
 		rx_bytes = b''.join([rx_bytes, new_rx_bytes])
@@ -481,6 +488,8 @@ def check_for_rx(rx_bytes):
 	return rx_bytes
 
 def update_file_list(files_dict):
+	global files
+	files_dict = files
 	fileList = []
 	for file_name in files_dict:
 		if 'hash' in files_dict[file_name]:
@@ -542,9 +551,11 @@ layout3= [[sg.Text('Callsign', size=(10,1)),sg.Input(config['mycall'],key='cCall
 tabgrp = [[sg.TabGroup([[sg.Tab('Receive', layout1), sg.Tab('Transmit', layout2), sg.Tab('Config', layout3)]], key='tabs', enable_events=True)]]  
         
 #Define Window
-window =sg.Window(config['version'],tabgrp, icon="pyamp.png")
+window = sg.Window(config['version'],tabgrp, icon="pyamp.png")
 
 def update_rTabFromListBox(hash_file_name): 
+	global window
+	global files
 	file_name = file_hash = date_time_string = desc = call_info = num_bytes = num_blocks = block_size = missing_blocks = ''
 	if hash_file_name != '':
 		hash_file_name = hash_file_name.split(' ')
@@ -601,11 +612,16 @@ def print_msg(file_name):
 	return print_str
 
 def onTimeout(rx_bytes):
+	global files
+	global fileList
 	files_str = str(files)
-	rxdata = process_rx(rx_bytes)
+	rx_bytes = check_for_rx(rx_bytes)
+	rx_bytes = process_rx(rx_bytes)
 	if files_str != str(files):
 		fileList = update_file_list(files)
-		window['rFileList'].update(values)
+		window['rFileList'].update(values=fileList)
+		update_file_list(fileList)
+	return rx_bytes
 
 #Read  values entered by user
 while True:
@@ -620,11 +636,13 @@ while True:
 		remove_file = remove_file[1]
 		files.pop(remove_file)
 		fileList = update_file_list(files)
-		window['rFileList'].update(values)
+		window['rFileList'].update(values=fileList)
 		update_rTabFromListBox('')
 		save_files(files)
 	if event == '__TIMEOUT__':
-		onTimeout (rxdata)
+		rxdata = onTimeout(rxdata)
+		#rxdata = process_rx(rxdata)
+		#fileList = update_file_list(files)
 	if event == 'rFileList':
 		if fileList != []:
 			#print(values ['rFileList'])		
@@ -643,4 +661,3 @@ while True:
 	if event == sg.WIN_CLOSED or event == 'Exit':
 		break
 window.close()
-
