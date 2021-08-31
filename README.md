@@ -1,7 +1,7 @@
 # pyAMP
 pyAMP enables point-to-multipoint (PTMP) file transfers over amateur radio with the Amatuer Multicast Protocol and using the popular fldigi as a software modem.  It is, of course, inspired by flamp, fldigi, and the rest of the Narrow Band Emergency Messaging System (NBEMS) suite of applications.
 
-The main goal of the project is to allow radio operators to more efficeiently and reliably handle emergency communications with fewer retries and duplicate transmissions.  Once received, messages are kept in the received file queue until explicitly removed, even after closing and restarting the application, rebooting the computer, or a software crash.  This greatly reduces the chance of operators relaying messages to send "different versions" of the same file.
+The main goal of the project is to allow radio operators to more efficeiently and reliably handle emergency communications with fewer retries and duplicate transmissions.  Once received, messages are kept in the received file queue until explicitly removed, even after closing and restarting the application or rebooting the computer.  This greatly reduces the chance that operators relaying messages end up sending "different versions" of the same file... or worse yet, partially receiving the same file twice, and still being unable to decode it.
 
 In the case of partially received files, pyAMP can recognize when transmissions with different AMP "queue IDs" are actually the same file (with the same compression and encoding).  As long as each block in a file has been received at least once, pyAMP can combine the partial receptions to successfully decode the file.
 
