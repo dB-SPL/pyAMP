@@ -5,7 +5,7 @@ with open("README.md", "r") as fh:
 
 setuptools.setup(
     name="pyAMP",
-    version="0.0.4",
+    version="0.0.6",
     author="dB-SPL",
     author_email="",
     description="Python implementation of the Amateur Multicast Protocol (AMP-2) Version 3.0 as used by FLAMP",
