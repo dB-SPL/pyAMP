@@ -22,4 +22,4 @@ To launch the Python module, use:
 Have a great idea to improve pyAMP?  Please submit a pull request or issue here on GitHub.
 
 ### Credits
-Dave Freese W1HKJ's [fldigi application](http://www.w1hkj.com/) provides the modems,  pyAMP uses Niel Jansen MK4YRI's [pyFldigi library](https://github.com/KM4YRI/pyFldigi) to interface with fldigi via XML-RPC, and Raymond Buvel's [crcmod](http://crcmod.sourceforge.net/) is used for the required checksums.  The GUI is built with [PySimpleGUI](http://pysimplegui.org), and the executable files were created with [pyinstaller](http://pyinstaller.org).
+Dave Freese W1HKJ's [fldigi application](http://www.w1hkj.com/) provides the modems.  pyAMP uses Niel Jansen KM4YRI's [pyFldigi library](https://github.com/KM4YRI/pyFldigi) to interface with fldigi via XML-RPC, and Raymond Buvel's [crcmod](http://crcmod.sourceforge.net/) is used for the required checksums.  The GUI is built with [PySimpleGUI](http://pysimplegui.org), and the executable files were created with [pyinstaller](http://pyinstaller.org).
