@@ -1,4 +1,4 @@
-__version__ = 'pyAMP 0.0.4 preview'
+__version__ = 'pyAMP 0.0.6 preview'
 
 import PySimpleGUI as sg
 import pickle
@@ -10,10 +10,9 @@ from time import gmtime, strftime
 from datetime import datetime
 from os import __file__, getcwd, path, mkdir, stat
 
-fldigi = pyfldigi.Client()
 rxdata = b''
-rx_counter = int(0)
 requested_blocks = []
+rx_hash = ''
 
 script_dir = getcwd()
 
@@ -53,10 +52,18 @@ except FileNotFoundError:
 	save_config(config)
 	
 
+if config['version'] != __version__:
+	config['version'] = __version__
+	save_config(config)
+
 def save_files(files_dict):
 	with open('files','wb') as f:
-		pickle.dump(files_dict,f)
-		
+		pickle.dump(files_dict,f)	
+
+def save_tx_queue(tx_dict):
+	with open('tx-queue','wb') as f:
+		pickle.dump(tx_dict,f)
+
 try:
 	with open('files','rb') as f:
 		files = pickle.load(f)
@@ -65,6 +72,15 @@ except FileNotFoundError:
 	files = {'unknown': {'hash': {}}}
 	save_files(files)
 	print('Saved new file list.')
+
+try:
+	with open('tx-queue','rb') as f:
+		tx_queue = pickle.load(f)
+except FileNotFoundError:
+	print('TX queue not found.  Starting a new list...')
+	tx_queue = {}
+	save_tx_queue(tx_queue)
+	print('Saved new transmit queue.')
 
 def checksum(data):
 	crc16 = crcmod.mkCrcFun(0x18005, 0xffff, True)
@@ -76,16 +92,28 @@ def checksum(data):
 		crc = '{0:0{1}X}'.format(crc16(data),4)
 	return crc        
 
-def k2sToBase64(file_path):
-	with open(file_path, 'rb') as file:
-		k2s = file.read()
+def k2sToBase64(file_path_or_bytes):
+	if type(file_path_or_bytes) == str:
+		with open(file_path_or_bytes, 'rb') as file:
+			k2s = file.read()
+	elif type(file_path_or_bytes) == bytes:
+		k2s = file_path_or_bytes
+	else:
+		raise TypeError("Expected bytes or str containing path to file.")
 	uncompressed_size = len(k2s)
 	compressed_data = lzma.compress(k2s,format=lzma.FORMAT_RAW,filters=[{'id': lzma.FILTER_LZMA2}])[6:][:-1]
 	bin = b''.join([b'\x01LZMA',len(k2s).to_bytes(4, byteorder="big"),b']\x00\x00\x00\x04',compressed_data])
-	return base64.b64encode(bin).decode()
+	return '[b64:start]' + base64.b64encode(bin).decode() + '\n[b64:end]'
+
+def base64ToBlocks(b64str, block_size=64):
+	data_array = [b64str.encode()[i:i+block_size] for i in range(0, len(b64str), block_size)]
+	data_dict = {}
+	for i in range(len(data_array)):
+		block_num = i + 1
+		data_dict[block_num] = data_array[i]
+	return data_dict
 
 def base64ToFlamp(file_hash,block_size,b64str):
-	b64str = '[b64:start]' + b64str + '\n[b64:end]'
 	data_array = [b64str[i:i+block_size] for i in range(0, len(b64str), block_size)]
 	block_array = []
 	for i in range(0, len(data_array)):
@@ -94,7 +122,7 @@ def base64ToFlamp(file_hash,block_size,b64str):
 		block_array.append('<DATA ' + str(len(block_contents)) + ' ' + checksum(block_contents) + '>' + block_contents)
 	return block_array
 
-def makePreamble(file_hash, date_time_filename, msg_size, num_of_blocks, block_size, id=config['mycall'] + config['info'], prog=config['version']):
+def makePreamble(file_hash, date_time_filename, msg_size, num_of_blocks, block_size, id=config['mycall'] + config['info'], desc='', prog=config['version']):
 	prog_contents = '{' + file_hash + '}' + prog
 	file_contents = '{' + file_hash + '}' + date_time_filename
 	id_contents = '{' + file_hash + '}' + id
@@ -103,7 +131,12 @@ def makePreamble(file_hash, date_time_filename, msg_size, num_of_blocks, block_s
 	pre_file = '<FILE ' + str(len(file_contents)) + ' ' + checksum(file_contents) + '>' + file_contents
 	pre_id = '<ID ' + str(len(id_contents)) + ' ' + checksum(id_contents) + '>' + id_contents
 	pre_size = '<SIZE ' + str(len(size_contents)) + ' ' + checksum(size_contents) + '>' + size_contents
-	preamble = pre_prog + '\n' + pre_file + '\n' + pre_id + '\n' + pre_size + '\n'
+	if desc == '':
+		preamble = pre_prog + '\n' + pre_file + '\n' + pre_id + '\n' + pre_size + '\n'
+	else:
+		desc_contents = '{' + file_hash + '}' + desc
+		pre_desc = '<DESC ' + str(len(desc_contents)) + ' ' + checksum(desc_contents) + '>' + desc_contents
+		preamble = pre_prog + '\n' + pre_file + '\n' + pre_id + '\n' + pre_desc + '\n' + pre_size + '\n'
 	return preamble
 
 def fileToFlamp(file_path,relay=False,block_size=64,compress='auto',file_hash='auto',base_conversion='base64'):
@@ -127,7 +160,7 @@ def fileToFlamp(file_path,relay=False,block_size=64,compress='auto',file_hash='a
 	data_array = [msg[i:i+block_size] for i in range(0, len(msg), block_size)]
 	block_array = []
 	if relay == False:
-		block_array.append(makePreamble(file_hash, date_time_filename, len(msg), int(len(data_array)), block_size, config['mycall']))
+		block_array.append(makePreamble(file_hash, date_time_filename, len(msg), int(len(data_array)), block_size, config['mycall'] + ' ' + config['info']))
 	else:
 		block_array.append('FLAMP RELAY\n')
 	for i in range(0, len(data_array)):
@@ -136,16 +169,87 @@ def fileToFlamp(file_path,relay=False,block_size=64,compress='auto',file_hash='a
 		block_array.append('<DATA ' + str(len(block_contents)) + ' ' + checksum(block_contents) + '>' + block_contents + '\n')
 	return block_array
 
+def relay_received_blocks(file_hash, block_list_str):
+	global files
+	block_list_array = block_list_str.split(' ')
+	block_list = []
+	block_array = []
+	desc = ''
+	data_format = ''
+	for file_name in files:
+		if 'hash' in files[file_name]:
+			if file_hash in files[file_name]['hash']:
+				date_time_filename = files[file_name]['hash'][file_hash]['date_time'] + ':' + file_name
+				msg_id = files[file_name]['hash'][file_hash]['id']
+				size_contents = files[file_name]['hash'][file_hash]['size'].split(' ')
+				msg_size = size_contents[0]
+				num_of_blocks = size_contents[1]
+				block_size = size_contents[2]
+				if 'desc' in files[file_name]['hash'][file_hash]:
+					desc = files[file_name]['hash'][file_hash]['desc']
+				if 'size' in files[file_name]['hash'][file_hash] and 'format' in files[file_name]['hash'][file_hash]:
+					data_format = files[file_name]['hash'][file_hash]['size'] + ' ' + files[file_name]['hash'][file_hash]['format']
+				if block_list_array == ['']:
+					block_array.append(makePreamble(file_hash, date_time_filename, msg_size, num_of_blocks, block_size, msg_id, desc))
+					if data_format == '':
+						for i in range(1, int(num_of_blocks) + 1):
+							block_contents = '{' + file_hash + ':' + str(i) + '}' + files[file_name]['hash'][file_hash]['data'][i].decode()
+							block_array.append('<DATA ' + str(len(block_contents)) + ' ' + checksum(block_contents) + '>' + block_contents + '\n')
+					else:
+						for i in range(1, int(num_of_blocks) + 1):
+							if files[file_name]['data'][data_format][i] != b'':
+								block_contents = '{' + file_hash + ':' + str(i) + '}' + files[file_name]['data'][data_format][i].decode()
+								block_array.append('<DATA ' + str(len(block_contents)) + ' ' + checksum(block_contents) + '>' + block_contents + '\n')
+				else:
+					for i in block_list_array:
+						if i.isdigit():
+							block_list.append(int(i))
+					for i in block_list:
+						if i == 0:
+							block_array.append(makePreamble(file_hash, date_time_filename, msg_size, num_of_blocks, block_size, msg_id, desc))
+						else:
+							if data_format == '':
+								block_contents = '{' + file_hash + ':' + str(i) + '}' + files[file_name]['hash'][file_hash]['data'][i].decode()
+								block_array.append('<DATA ' + str(len(block_contents)) + ' ' + checksum(block_contents) + '>' + block_contents + '\n')
+							else:
+								if files[file_name]['data'][data_format][i] != b'':
+									block_string = files[file_name]['data'][data_format][i].decode()
+									block_contents = '{' + file_hash + ':' + str(i) + '}' + block_string
+									block_array.append('<DATA ' + str(len(block_contents)) + ' ' + checksum(block_contents) + '>' + block_contents + '\n')
+	relay_str = '\nFLAMP RELAY\nde ' + config['mycall'] + '\n\n' + ''.join(block_array) + '\nde ' + config['mycall'] + '\n\n'
+	return relay_str
+
 def parse_block(string):
 	string_split = string.split('{')
 	hash_split = string_split[1].split(':')
 	num_block = hash_split[1].split('}')
 	return [hash_split[0], num_block[0], num_block[1]]
 
+def add_to_tx_queue(file_path):
+	global tx_queue
+	with open(file_path, 'rb') as f:
+		add_file = f.read()
+	file_name = path.basename(file_path)
+	print('Adding ' + file_name + ' to TX queue.')
+	date_time_string = datetime.fromtimestamp(stat(file_path).st_mtime).strftime('%Y%m%d%H%M%S')
+	print('date_time: ' + date_time_string)
+	if file_name not in tx_queue:
+		tx_queue[file_name] = {}
+		tx_queue[file_name]['path'] = file_path
+		tx_queue[file_name]['date_time'] = date_time_string
+		tx_queue[file_name]['complete'] = add_file
+		print(add_file)
+		save_tx_queue(tx_queue)
+		return tx_queue
 
+def remove_from_tx_queue(file_name):
+	global tx_queue
+	tx_queue.pop(file_name)
+	save_tx_queue(tx_queue)
 
 def add_proto_block(keyword, file_hash, block):
 	global files
+	global rx_hash
 	print('Adding ' + keyword + ' block')
 	hash_found = False
 	if keyword == 'PROG':
@@ -256,6 +360,7 @@ def add_proto_block(keyword, file_hash, block):
 								if blk_num in files[file_name]['hash'][file_hash]['data']:
 									files[file_name]['data'][data_format][blk_num] = files[file_name]['hash'][file_hash]['data'].pop(blk_num)							
 		if hash_found == True:
+			rx_hash = file_hash
 			fileListUpdated = True
 			check_file_complete(file_name, file_hash)
 		if hash_found == False:
@@ -324,7 +429,10 @@ def check_file_complete(file_name, file_hash):
 		data_format = size + ' ' + file_format
 		blocks = files[file_name]['data'][data_format]
 	elif 'size' in files[file_name]['hash'][file_hash] and 'format' in files[file_name]['hash'][file_hash] and 'data' in files[file_name]['hash'][file_hash]:
+		size = file[file_name]['hash'][file_hash]['size']
 		blocks = files[file_name]['hash'][file_hash]['data']
+	else:
+		return
 	size_content = size.split(' ')
 	num_blks = size_content[1]
 	num_blks = int(num_blks)
@@ -347,6 +455,7 @@ def check_file_complete(file_name, file_hash):
 				
 
 def add_data_block(file_hash, block_num, block):
+	global rx_hash
 	print('Adding DATA block')
 	print('file_hash: ' + file_hash)
 	print('block_num: ' + str(block_num))
@@ -376,6 +485,7 @@ def add_data_block(file_hash, block_num, block):
 				files[file_name]['hash'][file_hash]['data'][block_num] = block
 				check_file_complete(file_name, file_hash)
 			hash_found = True
+			rx_hash = file_hash
 			fileListUpdated = True
 	if hash_found == False:
 		if 'unknown' not in files:
@@ -403,9 +513,7 @@ def process_rx(rx_bytes):
 			more_data = False
 		else:
 			start_pos = block[0]
-			print(start_pos)
 			end_pos = block[1]
-			print(end_pos)
 			new_rx_bytes = remove_block_from_rx(rx_bytes, start_pos, end_pos)
 			rx_bytes = new_rx_bytes
 	if start_files != str(files):
@@ -433,36 +541,61 @@ def search_missing_block_report(rx_bytes, file_hash, start_search=0):
 		if check == checksum(block):
 			request_hash = chunk[1:][:4].decode()
 			if request_hash == file_hash:
-				request_blocks = chunk[6:].decode().split(' ')
-				request_blocks.pop(request_blocks.index(''))
 				blk_list = []
-				for blk in request_blocks:
-					blk_list.append(int(blk))
-				end_pos = end_pos = rx_bytes.find(block, start_pos) + len(block)
+				if chunk[6:].decode() == 'PREAMBLE':
+					blk_list.append(0)
+				else:
+					request_blocks = chunk[6:].decode().split(' ')
+					request_blocks.pop(request_blocks.index(''))
+					for blk in request_blocks:
+						blk_list.append(int(blk))
+				end_pos = rx_bytes.find(block, start_pos) + len(block)
 				return [start_pos, end_pos, blk_list]
+			else:
+				return [start_pos, start_pos + 9, 'wrong_hash']
 		else:
-				return [start_pos, 'checksum_error']
+				return [start_pos, start_pos + 9, 'checksum_error']
 	else:
-		return -1
+		return [start_pos, start_pos + 1, 'not_found']
 
-def fetch_missing_blocks(rx_bytes, file_hash):
+def fetch_missing_blocks(file_hash):
+	global rxdata
+	rx_bytes = rxdata
+	request_blocks = []
+	requested_blocks = []
 	start_search = 0
 	more_data = True
+	print('Fetching missing blocks for', file_hash)
 	while more_data == True:
 		request_blocks = search_missing_block_report(rx_bytes, file_hash, start_search)
+		print('request_blocks:', request_blocks)
 		if request_blocks == -1:
 			more_data = False
-		elif request_blocks[1] == 'checksum_error':
-			start_search = request_blocks[0]+9
+		elif request_blocks == None:
+			more_data = False
 		else:
-			start_pos = int(request_blocks[0])
-			end_pos = int(request_blocks[1])
-			for blk in request_blocks[2]:
-				if blk not in requested_blocks:
-					requested_blocks.append(blk)
-			new_rx_bytes = remove_block_from_rx(rx_bytes, start_pos, end_pos)
-			rx_bytes = new_rx_bytes
-	return rx_bytes
+			if len(request_blocks) == 3:
+				start_pos = int(request_blocks[0])
+				end_pos = int(request_blocks[1])
+				print ('start_pos:', start_pos, 'end_pos:', end_pos, 'content:', request_blocks[2])
+				if request_blocks[2] == 'not_found':
+					more_data = False
+				elif request_blocks[2] == 'wrong_hash':
+					start_search = end_pos
+				elif request_blocks[2] == 'checksum_error':
+					rx_bytes = remove_block_from_rx(rx_bytes, start_pos, end_pos)
+				else:
+					for blk in request_blocks[2]:
+						requested_blocks.append(blk)
+					rx_bytes = remove_block_from_rx(rx_bytes, start_pos, end_pos)
+				print('requested_blocks:', requested_blocks)
+	rxdata = rx_bytes
+	print('Fetched blocks:', requested_blocks)
+	fetched_blocks = []
+	for i in range(256):
+		if i in requested_blocks:
+			fetched_blocks.append(str(i))
+	return fetched_blocks
 
 def search_rx_for_block(rx_bytes, add_block=True):
 	start_pos = -1
@@ -515,17 +648,6 @@ def search_rx_for_block(rx_bytes, add_block=True):
 		return -1
 	elif start_pos == -1:
 		return -1
-	
-def check_for_rx(rx_bytes):
-	global fldigi
-	new_rx_bytes = fldigi.text.get_rx_data()
-	if new_rx_bytes != b'':
-		if len(rx_bytes) + len(new_rx_bytes) > 4096:
-			rx_len = 4096 - len(new_rx_bytes)
-			rx_bytes = rx_bytes[-rx_len:]
-		rx_bytes = b''.join([rx_bytes, new_rx_bytes])
-		rx_bytes = process_rx(rx_bytes)
-	return rx_bytes
 
 def update_file_list(files_dict):
 	global files
@@ -534,7 +656,7 @@ def update_file_list(files_dict):
 	for file_name in files_dict:
 		if 'hash' in files_dict[file_name]:
 			for file_hash in files_dict[file_name]['hash']:
-				percent_complete = ''
+				percent_complete = ' ? %'
 				if 'size' in files_dict[file_name]['hash'][file_hash]:
 					size = files_dict[file_name]['hash'][file_hash]['size']
 					num_blks = size.split(' ')
@@ -549,105 +671,63 @@ def update_file_list(files_dict):
 									if files[file_name]['data'][data_format][blk] == b'':
 										missing_blocks.append(blk)
 								num_missing = len(missing_blocks)
-								percent_complete = str(round((int(num_blks) - num_missing) / int(num_blks) * 100)) + '%'
-								fileList.append(file_hash + ' ' + file_name + ' ' + percent_complete)
+								percent_complete = '   ' + str(round((int(num_blks) - num_missing) / int(num_blks) * 100)) + '%'
+								percent_complete = percent_complete[-4:]
+								fileList.append(percent_complete + ' ' + file_hash + ' ' + file_name)
 					else:
 
-						fileList.append(file_hash + ' ' + file_name + ' waiting for preamble...')
+						fileList.append(percent_complete + ' ' + file_hash + ' ' + file_name + ' waiting for preamble...')
 				else:
-					fileList.append(file_hash + ' waiting for preamble...')
+					fileList.append(percent_complete + ' ' + file_hash + ' ' + file_name + ' waiting for preamble...')
 	return fileList
+
+def update_tx_list(tx_dict):
+	txList = []
+	for file_name in tx_dict:
+		if 'path' in tx_dict[file_name]:
+			txList.append(tx_dict[file_name]['path'])
+	return txList
 
 fileList = []
 fileList = update_file_list(files)
+txList = []
+txList = update_tx_list(tx_queue)
+
+font = 'Monospace'
 
 #define layout
-layout1 = [[sg.Text('File', size=(10,1)),sg.Input('',key='rFile',readonly=True)],
-           [sg.Text('Date Time', size=(10,1)),sg.Input('',key='rDateTime',readonly=True)],
-           [sg.Text('Description', size=(10,1)),sg.Input('',key='rDesc',readonly=True)],
-           [sg.Text('Call/Info', size=(10,1)),sg.Input('',key='rCallInfo',readonly=True)],
-           [sg.Button('Save As',size=(8,1),key='rSave', disabled=True),sg.Button('Remove',size=(8,1),key='rRemove', disabled=True),sg.Button('Report',key='rReport', size=(8,1), disabled=True)],
-           [sg.Text('Nbr Bytes', size=(8,1)),sg.Input('',key='rBytes',size=(8,1),readonly=True),sg.Text('Nbr Blks', size=(8,1)), sg.Input('',key='rBlocks',size=(8,1),readonly=True, use_readonly_for_disable=False), sg.Text('Blk Size', size=(7,1)), sg.Input('',key='rBlockSize',size=(8,1),readonly=True, use_readonly_for_disable=False)],
-           [sg.Text('Missing', size=(10,1)), sg.Input('',key=('rMissing'),readonly=True)],
+layout1 = [[sg.Text('File', size=(10,1)),sg.Input('',key='rFile',readonly=True, font=font)],
+           [sg.Text('Date Time', size=(10,1)),sg.Input('',key='rDateTime',readonly=True, font=font)],
+           [sg.Text('Description', size=(10,1)),sg.Input('',key='rDesc',readonly=True, font=font)],
+           [sg.Text('Call/Info', size=(10,1)),sg.Input('',key='rCallInfo',readonly=True, font=font)],
+           [sg.Button('Save As',size=(8,1),key='rSave', disabled=True),sg.Button('Load Ext',size=(8,1), key='rLoadExt', disabled=True), sg.Button('Remove',size=(8,1),key='rRemove', disabled=True),sg.Button('Report',key='rReport', size=(8,1), disabled=True)],
+           [sg.Text('Nbr Bytes', size=(8,1)),sg.Input('',key='rBytes',size=(8,1),readonly=True, font=font),sg.Text('Nbr Blks', size=(8,1)), sg.Input('',key='rBlocks',size=(8,1),readonly=True, font=font), sg.Text('Blk Size', size=(7,1)), sg.Input('',key='rBlockSize',size=(8,1),readonly=True, font=font)],
+           [sg.Text('Missing', size=(10,1)), sg.Input('',key='rMissing',readonly=True, font=font)],
            [sg.Text('Data')],
-           [sg.Multiline('', key='rData', size=(55,4), autoscroll=False, disabled=True)],
-           [sg.Button('Relay',size=(8,1), key='rRelay', disabled=True),sg.Button('Fetch', size=(8,1), key='rFetch', disabled=True),sg.Input('',key='rRelayMissing', size=(30,1))],
+           [sg.Multiline('', key='rData', size=(55,4), autoscroll=False, disabled=True, font=font)],
+           [sg.Button('Relay',size=(8,1), key='rRelay', disabled=True),sg.Button('Fetch', size=(8,1), key='rFetch', disabled=True),sg.Input('',key='rRelayMissing', size=(30,1), font=font)],
            [sg.Text('Receive Queue')],
-           [sg.Listbox(values=fileList, key='rFileList', size=(55, 5), enable_events=True,select_mode='LISTBOX_SELECT_MODE_SINGLE')]]
-layout2=[[sg.Text('Send To', size=(10,1)),sg.Input('QST',key='tSendTo')],
-           [sg.Text('File', size=(10,1)),sg.Input('',key='tFile')],
-           [sg.Text('Description', size=(10,1)),sg.Input('',key='tDisc')],
-           [sg.Text('Blk Size', size=(7,1)),sg.Input('64',key='tBlockSize',size=(4,1)),sg.Text('Xmt Rpt', size=(7,1)), sg.Input('1',key='tXmtRpt',size=(3,1)), sg.Text('Hdr Rpt', size=(7,1)), sg.Input('1',key='tHdrRpt',size=(3,1)), sg.Text('Nbr Blks',size=(7,1)), sg.Input('',key='tNbrBlocks',size=(4,1))],
-           [sg.Checkbox('Compress', default=True),sg.Checkbox('Transmit Unproto', default=False),sg.Input('',key='tBytes',size=(20,1))],
-           [sg.Text('Blocks', size=(10,1)),sg.Input('',key='tBlocks')],
-           [sg.Button('Transmit',key='tXmit',size=(8,1)),sg.Button('Transmit All',key='tXmitAll',size=(8,1)),sg.Button('Remove',key='tRemove',size=(8,1)),sg.Button('Add',key='tAdd',size=(8,1))],
+           [sg.Listbox(values=fileList, key='rFileList', size=(55, 5), enable_events=True,select_mode='LISTBOX_SELECT_MODE_SINGLE', font=font)]]
+layout2=[[sg.Text('Send To', size=(10,1)),sg.Input('QST',key='tSendTo', font=font)],
+           [sg.Text('File', size=(10,1)),sg.Input('',key='tFile', readonly=True, font=font)],
+           [sg.Text('Date Time', size=(10,1)), sg.Input('',key='tDateTime', readonly=True, font=font)],
+           [sg.Text('Description', size=(10,1)),sg.Input('',key='tDesc', font=font, change_submits=True)],
+           [sg.Text('Blk Size', size=(7,1)),sg.Input('64',key='tBlockSize',size=(4,1), font=font), sg.Text('Xmt Rpt', size=(7,1)), sg.Input('1',key='tXmtRpt',size=(3,1), font=font), sg.Text('Hdr Rpt', size=(7,1)), sg.Input('1',key='tHdrRpt',size=(3,1), font=font), sg.Text('Nbr Blks',size=(7,1)), sg.Input('',key='tNumBlocks',size=(4,1), font=font)],
+           [sg.Checkbox('Compress', key='tCompress', default=True),sg.Text('Encoding'),sg.Combo(['base64'], default_value='base64', key='tEncoding'),sg.Checkbox('Transmit Unproto', key='tTransmitUnproto', default=False),sg.Text('Bytes'),sg.Input('',key='tNumBytes',size=(10,1),readonly=True,font=font)],
+           [sg.Button('Fetch', key='tFetch', size=(8,1)), sg.Text('Blocks', size=(6,1)),sg.Input('',key='tBlocks', size=(30,1), font=font)],
+           [sg.Button('Transmit',key='tXmit',size=(8,1)),sg.Button('Transmit All',key='tXmitAll',size=(8,1)),sg.Button('Remove',key='tRemove',size=(8,1)),sg.Input(key='tAddInput', change_submits=True, visible=False), sg.FileBrowse('Add',key='tAdd',size=(8,1))],
            [sg.Text('Transmit Queue')],
-           [sg.Listbox(values=[], key='tFileList', size=(55, 10), enable_events=True)]]
-layout3= [[sg.Text('Callsign', size=(10,1)),sg.Input(config['mycall'],key='cCallsign')],
-           [sg.Text('Info', size=(10,1)),sg.Input(config['info'],key='cInfo')],
+           [sg.Listbox(values=txList, key='tFileList', size=(55, 10), enable_events=True, select_mode='LISTBOX_SELECT_MODE_SINGLE', font=font)]]
+layout3= [[sg.Text('Callsign', size=(10,1)),sg.Input(config['mycall'],key='cCallsign', font=font)],
+           [sg.Text('Info', size=(10,1)),sg.Input(config['info'],key='cInfo', font=font)],
            [sg.Button('Save',key='cSave'),sg.Text('',key='cSaveText')]]
 
 #Define Layout with Tabs         
 tabgrp = [[sg.TabGroup([[sg.Tab('Receive', layout1, key='receive'), sg.Tab('Transmit', layout2, key='transmit'), sg.Tab('Config', layout3, key='config')]], key='tabs', enable_events=True)]]  
-        
+
 #Define Window
 window = sg.Window(__version__,tabgrp, icon=pyamp_icon)
-
-def update_rTabFromListBox(hash_file_name): 
-	global window
-	global files
-	file_name = file_hash = date_time_string = desc = call_info = num_bytes = num_blocks = block_size = missing_blocks = missing_blocks_str = ''
-	file_percent = '0'
-	rRemoveDisabled = True
-	if hash_file_name != '':
-		rRemoveDisabled = False
-		hash_file_name = hash_file_name.split(' ')
-		file_hash = hash_file_name[0]
-		file_name = hash_file_name[1]
-		if len(hash_file_name) == 3:
-			file_percent = hash_file_name[2]
-		if file_name == 'waiting':
-			file_name = 'unknown'
-		if file_name in files:
-			if 'date_time' in files[file_name]['hash'][file_hash]:
-				date_time_string = files[file_name]['hash'][file_hash]['date_time']
-			else:
-				window['rDateTime'].update(value='unknown')
-			if 'desc' in files[file_name]['hash'][file_hash]:
-				desc = files[file_name]['hash'][file_hash]['desc']
-			if 'id' in files[file_name]['hash'][file_hash]:
-				call_info = files[file_name]['hash'][file_hash]['id']
-			if 'size' in files[file_name]['hash'][file_hash]:
-				size_str = files[file_name]['hash'][file_hash]['size']
-				size = size_str.split(' ')
-				num_bytes = size[0]
-				num_blocks = size[1]
-				block_size = size[2]
-			if 'format' in files[file_name]['hash'][file_hash]:
-				missing_blocks = []
-				file_format = files[file_name]['hash'][file_hash]['format']
-				data_format = size_str + ' ' + file_format
-				if 'data' in files[file_name]:
-					if data_format in files[file_name]['data']:
-						for blk in files[file_name]['data'][data_format]:
-							if files[file_name]['data'][data_format][blk] == b'':
-								missing_blocks.append(blk)
-				missing_blocks_str = ' '.join(map(str, missing_blocks))
-	window['rFile'].update(value=file_name)
-	window['rDateTime'].update(value=date_time_string)
-	window['rDesc'].update(value=desc)
-	window['rCallInfo'].update(value=call_info)
-	if file_percent == '100%':
-		window['rSave'].update(disabled=False)
-	else:
-		window['rSave'].update(disabled=True)
-	window ['rRemove']. update (disabled=rRemoveDisabled)
-	window['rBytes'].update(value=num_bytes)
-	window['rBlocks'].update(value=num_blocks)
-	window['rBlockSize'].update(value=block_size)
-	window['rMissing'].update(value=missing_blocks_str)
-	window['rData'].update(print_msg(file_name))
-
+        
 def print_msg(file_name):
 	global files
 	print_str = ''
@@ -657,64 +737,307 @@ def print_msg(file_name):
 			print_str = print_bytes.decode('cp1252')
 	return print_str
 
+def update_rTabFromListBox(hash_file_name): 
+	global window
+	global files
+	global tx_queue
+	file_name = file_hash = file_percent = date_time_string = desc = call_info = num_bytes = num_blocks = block_size = missing_blocks = missing_blocks_str = relay_missing = ''
+	rRemoveDisabled = True
+	rReportDisabled = True
+	if hash_file_name != '':
+		rRemoveDisabled = False
+		rReportDisabled = False
+		file_percent = hash_file_name[:4]
+		hash_file_name = hash_file_name[5:]
+		hash_file_name = hash_file_name.split(' ')
+		file_hash = hash_file_name[0]
+		print('file_hash: ' + file_hash)
+		file_name = hash_file_name[1]
+		print('file_name: ' + file_name)
+		if file_name in files:
+			if file_hash in files[file_name]['hash']:
+				if 'date_time' in files[file_name]['hash'][file_hash]:
+					date_time_string = files[file_name]['hash'][file_hash]['date_time']
+				else:
+					window['rDateTime'].update(value='unknown')
+				if 'desc' in files[file_name]['hash'][file_hash]:
+					desc = files[file_name]['hash'][file_hash]['desc']
+				if 'id' in files[file_name]['hash'][file_hash]:
+					call_info = files[file_name]['hash'][file_hash]['id']
+				if 'size' in files[file_name]['hash'][file_hash]:
+					size_str = files[file_name]['hash'][file_hash]['size']
+					size = size_str.split(' ')
+					num_bytes = size[0]
+					num_blocks = size[1]
+					block_size = size[2]
+				if 'format' in files[file_name]['hash'][file_hash]:
+					missing_blocks = []
+					file_format = files[file_name]['hash'][file_hash]['format']
+					data_format = size_str + ' ' + file_format
+					if 'data' in files[file_name]:
+						if data_format in files[file_name]['data']:
+							for blk in files[file_name]['data'][data_format]:
+								if files[file_name]['data'][data_format][blk] == b'':
+									missing_blocks.append(blk)
+					missing_blocks_str = ' '.join(map(str, missing_blocks))
+	window['rFile'].update(value=file_name)
+	window['rDateTime'].update(value=date_time_string)
+	window['rDesc'].update(value=desc)
+	window['rCallInfo'].update(value=call_info)
+	if file_percent == '100%':
+		window['rSave'].update(disabled=False)
+	else:
+		window['rSave'].update(disabled=True)
+	if file_percent == ' ? %':
+		window['rFetch'].update(disabled=True)
+		window['rRelay'].update(disabled=True)
+	else:
+		window['rFetch'].update(disabled=False)
+		window['rRelay'].update(disabled=False)
+	window['rRemove'].update(disabled=rRemoveDisabled)
+	window['rReport'].update(disabled=rReportDisabled)
+	window['rBytes'].update(value=num_bytes)
+	window['rBlocks'].update(value=num_blocks)
+	window['rBlockSize'].update(value=block_size)
+	window['rMissing'].update(value=missing_blocks_str)
+	window['rData'].update(print_msg(file_name))
+	window['rRelayMissing'].update(value='')
+
+def update_tTabFromListBox(tListEntry):
+	global values
+	tFile = tDateTime = tDesc = tNumBytes = tNumBlocks = ''
+	if values['tCompress'] == True:
+		file_format = '1' + values['tEncoding'] + values['tBlockSize']
+	else:
+		file_format = '0' + values['tEncoding'] + values['tBlockSize']
+	for file_name in tx_queue:
+		if 'path' in tx_queue[file_name]:
+			if tListEntry == tx_queue[file_name]['path']:
+				tFile = file_name
+				if 'date_time' in tx_queue[file_name]:
+					tDateTime = tx_queue[file_name]['date_time']
+				if 'desc' in tx_queue[file_name]:
+					tDesc = tx_queue[file_name]['desc']
+				if 'data' not in tx_queue[file_name]:
+					tx_queue[file_name]['data'] = {}
+				if file_format not in tx_queue[file_name]['data']:
+					b64 = k2sToBase64(tx_queue[file_name]['path'])
+					tx_queue[file_name]['data'][file_format] = base64ToBlocks(b64)
+				tNumBlocks = len(tx_queue[file_name]['data'][file_format])
+				tNumBytes = int(values['tBlockSize']) * (tNumBlocks -1) + len(tx_queue[file_name]['data'][file_format][tNumBlocks]) 
+	window['tFile'].update(value=tFile)
+	window['tDesc'].update(value=tDesc)
+	window['tDateTime'].update(value=tDateTime)
+	window['tNumBytes'].update(value=str(tNumBytes))
+	window['tNumBlocks'].update(value=str(tNumBlocks))
+		
+
+def update_file_desc(file_name, file_desc):
+	global tx_queue
+	if file_name in tx_queue:
+		tx_queue[file_name]['desc'] = file_desc
+		save_tx_queue(tx_queue)
+
 def onTimeout(rx_bytes):
 	global files
 	global fileList
+	global rx_hash
 	files_str = str(files)
 	rx_bytes = check_for_rx(rx_bytes)
 	rx_bytes = process_rx(rx_bytes)
 	if files_str != str(files):
 		fileList = update_file_list(files)
 		window['rFileList'].update(values=fileList)
-		update_file_list(fileList)
-	return rx_bytes
-
-#Read  values entered by user
-while True:
-	event,values=window.read(timeout=1000)
-	if config_exists == False:
-		window['config'].select()
-		window['cSaveText'].update(value='Please enter Callsign and Info.')
-	if event != '__TIMEOUT__':
-		print('event:', event)
-	#	print('values:', values)
-	#access all the values and if selected add them to a string
-	if event == 'rRemove':
-		#if fileList != []
-		remove_file = values['rFileList'][0].split(' ')
-		remove_hash = remove_file[0]
-		remove_file = remove_file[1]
-		files[remove_file]['hash'].pop(remove_hash)
-		if len(files[remove_file]['hash']) == 0:
-			files.pop(remove_file)
+	if rx_hash != '':
 		fileList = update_file_list(files)
 		window['rFileList'].update(values=fileList)
-		update_rTabFromListBox('')
-		save_files(files)
-	if event == '__TIMEOUT__':
-		rxdata = onTimeout(rxdata)
-		#rxdata = process_rx(rxdata)
-		#fileList = update_file_list(files)
-	if event == 'rSave':
-		rSaveFilePath = sg.popup_get_file('', no_window=True, save_as=True, default_path=values['rFile'])
-		write_save_as(values['rFile'], rSaveFilePath)
-	if event == 'rFileList':
 		if fileList != []:
-			#print(values ['rFileList'])		
-			rHashFileName = values['rFileList'][0]
-			update_rTabFromListBox(values['rFileList'][0])
-	if event == 'tabs' and values['tabs'] == 'Config':
-		window['cCallsign'].update(value=config['mycall'])
-		window['cInfo'].update(value=config['info'])
-	if event == 'tabs' and values['tabs'] != 'Config':
-		window['cSaveText'].update(value='')
-	if event == 'cSave':
-		if values['cCallsign'] != '':
-			config['mycall'] = values['cCallsign']
-			config['info'] = values['cInfo']
-			save_config(config)
-			config_exists = True
-			window['cSaveText'].update(value='Configuration saved')
-	if event == sg.WIN_CLOSED or event == 'Exit':
-		break
-window.close()
+			for i in range(len(fileList)):
+				entry = fileList[i]
+				print(entry, rx_hash)
+				if entry[5:][:4] == rx_hash:
+					print(entry[5:][:4])
+					window['rFileList'].set_focus(force=True)
+					window['rFileList'].set_value(entry)
+					update_rTabFromListBox(entry)
+		rx_hash = ''
+	return rx_bytes
+
+def check_for_rx(rx_bytes):
+	global fldigi
+	new_rx_bytes = fldigi.text.get_rx_data()
+	if new_rx_bytes != b'':
+		if len(rx_bytes) + len(new_rx_bytes) > 4096:
+			rx_len = 4096 - len(new_rx_bytes)
+			rx_bytes = rx_bytes[-rx_len:]
+		rx_bytes = b''.join([rx_bytes, new_rx_bytes])
+		rx_bytes = process_rx(rx_bytes)
+	return rx_bytes
+
+def report_missing_blocks(hash_file_name):
+	global window
+	percent_complete = hash_file_name[:4]
+	hash_file_name = hash_file_name[5:]
+	hash_file_name = hash_file_name.split(' ')
+	file_hash = hash_file_name[0]
+	file_name = hash_file_name[1]
+	if percent_complete == '100%':
+		report = '{' + file_hash + '}CONFIRMED'
+	elif percent_complete == ' ? %' or file_name == 'unknown':
+		report = '{' + file_hash + '}PREAMBLE'
+	else:
+		report = '{' + file_hash + '}' + values['rMissing']
+	report_str = '\n\nde ' + config['mycall'] + '\nFile: ' + file_name + '\n<MISSING ' + str(len(report)) + ' ' + checksum(report) + '>' + report + '\nde ' + config['mycall'] + '\n\n'
+	tx(report_str)
+
+def tx(tx_data):
+	sg.popup('About to transmit...', keep_on_top=True)
+	timeout = round(len(tx_data) / 2)
+	fldigi.main.send(tx_data, timeout)
+
+def connection_error_popup(error_text, title):
+	sg.popup(error_text, title=title, keep_on_top=True)
+
+class BreakoutException(Exception):
+	pass
+
+def main_func():
+	global fldigi
+	fldigi = pyfldigi.Client()
+	global window
+	global event
+	global values
+	global config_exists
+	global rxdata
+	global files
+	global fileList
+	global tx_queue
+	global txList
+	config_popup = False
+	tAddFilePath = ''
+	while True:
+		try:
+			#Read  values entered by user
+			event,values=window.read(timeout=100)
+			if config_exists == False:
+				if config_popup == False:
+					config_popup = True
+					sg.popup('Please enter your callsign and info.', title='Config', keep_on_top=True)
+				window['config'].select()
+				window['cSaveText'].update(value='Please enter Callsign and Info.')
+			#access all the values and if selected add them to a string
+			if event != '__TIMEOUT__':
+				print('event:', event)
+				#print('values:', values)
+			if event == '__TIMEOUT__':
+				rxdata = onTimeout(rxdata)
+			if values['tAddInput'] != tAddFilePath:
+				tAddFilePath = values['tAdd']
+				add_to_tx_queue(tAddFilePath)
+				txList = update_tx_list(tx_queue)
+				print('Adding ' + tAddFilePath + ' to TX queue.')
+				window['tFileList'].update(values=txList)
+				window['tAddInput'].update(value='')
+				tAddFilePath = ''
+			if event == 'rRemove':
+				remove_file = values['rFileList'][0]
+				remove_file = remove_file[5:]
+				remove_file = remove_file.split(' ')
+				remove_hash = remove_file[0]
+				remove_file = remove_file[1]
+				files[remove_file]['hash'].pop(remove_hash)
+				if len(files[remove_file]['hash']) == 0:
+						files.pop(remove_file)
+				fileList = update_file_list(files)
+				window['rFileList'].update(values=fileList)
+				update_rTabFromListBox('')
+				save_files(files)
+			if event == 'rReport':
+				report_file = values['rFileList'][0]
+				report_missing_blocks(report_file)
+			if event == 'rSave':
+				rSaveFilePath = sg.popup_get_file('', no_window=True, save_as=True, default_path=values['rFile'])
+				write_save_as(values['rFile'], rSaveFilePath)
+			if event == 'rFetch' and values['rFileList'] != []:
+				rFetchHash = values['rFileList'][0]
+				rFetchHash = rFetchHash[5:]
+				rFetchHash = rFetchHash[:4]
+				rMissingBlocks = ' '.join(fetch_missing_blocks(rFetchHash))
+				window['rRelayMissing'].update(value=rMissingBlocks)
+			if event == 'rRelay':
+				rRelayHash = values['rFileList'][0]
+				rRelayHash = rRelayHash[5:]
+				rRelayHash = rRelayHash[:4]
+				print('Relaying', rRelayHash, 'Blocks:', values['rRelayMissing'])
+				rRelayStr = relay_received_blocks(rRelayHash, values['rRelayMissing'])
+				tx(rRelayStr)
+				#window['rRelayMissing'].update(value='')
+			if event == 'rFileList':
+				if fileList != []:
+					print('fileList: ' + str(values ['rFileList']))
+					rHashFileName = values['rFileList'][0]
+					update_rTabFromListBox(rHashFileName)
+			if event == 'tDesc' and values['tFileList'] != []:
+				update_file_desc(path.basename(values['tFileList'][0]), values['tDesc']) 
+			if event == 'tRemove':
+				remove_file = path.basename(values['tFileList'][0])
+				tx_queue.pop(remove_file)
+				txList = update_tx_list(tx_queue)
+				window['tFileList'].update(values=txList)
+			if event == 'tAddInput':
+				tAddFilePath = values['tAddInput']
+				print(tAddFilePath)
+			if event == 'tFileList':
+				tFilePath = values['tFileList'][0]
+				print('tFilePath:', tFilePath)
+				update_tTabFromListBox(tFilePath)
+			if event == 'tabs':
+				window['cCallsign'].update(value=config['mycall'])
+				window['cInfo'].update(value=config['info'])
+			if event == 'tabs' and values['tabs'] != 'config':
+				window['cSaveText'].update(value='')
+			if event == 'cSave':
+				if values['cCallsign'] != '':
+					config['mycall'] = values['cCallsign']
+					config['info'] = values['cInfo']
+					save_config(config)
+					config_exists = True
+					window['cSaveText'].update(value='Configuration saved.')
+			if event == sg.WIN_CLOSED or event == 'Exit':
+				#window.close()
+				raise BreakoutException
+		except BreakoutException:
+			pass
+			return False
+		#except TypeError:
+		#	pass
+		#	return False
+		except Exception as e:
+			print(e)
+			pass
+			print(type(e))
+			print(e.args)
+			e = str(e)		
+			title = 'New Connection Error'
+			if e.find('NewConnectionError') >= 0:
+				error_text = 'Couldn\'t connect to FLDIGI.  Please start FLDIGI before pyAMP.  If it is already running, try restarting it, then press OK.\n\n' + e
+				connection_error_popup(error_text, title)
+			elif e.find('RemoteDisconnected') >= 0:
+				error_text = 'FLDIGI unexpectedly closed the connection.  Try restarting FLDIGI, then press OK.\n\n' + e
+				connection_error_popup(error_text, title)
+			elif e.find('ConnectionResetError') >= 0:
+				error_text = 'FLDIGI unexpectedly closed the connection.  Try restarting FLDIGI, then press OK.\n\n' + e
+				connection_error_popup(error_text, title)
+			else:
+				title = 'Error'
+				error_text = 'An error has occurred. The application will now close.\n\n' + e
+				connection_error_popup(error_text, title)
+				return False
+
+app_running = True
+while app_running == True:
+	app_running = main_func()
+	if app_running == False:
+		window.close()
+#window.close()
+exit()
