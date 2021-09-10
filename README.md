@@ -6,7 +6,7 @@ The main goal of the project is to allow radio operators to more efficeiently an
 In the case of partially received files, pyAMP can recognize when transmissions with different AMP "queue IDs" are actually the same file (with the same compression and encoding).  As long as each block in a file has been received at least once, pyAMP can combine the partial receptions to successfully decode the file.
 
 ### Status
-[A preview version capable of receiving and relaying files](https://github.com/dB-SPL/pyAMP/releases/tag/preview) is currently available while I work on the features required for encoding and transmitting files.  Executable files are available for Windows as well as Raspberry Pi OS.  The Raspberry Pi version will likely work on other Linux systems using ARM.  They can be launched with a simple double-click.
+[A preview version capable of receiving and relaying files](https://github.com/dB-SPL/pyAMP/releases/) is currently available while I work on the features required for encoding and transmitting files.  Executable files are available for Windows as well as Raspberry Pi OS.  The Raspberry Pi version will likely work on other Linux systems using ARM.  They can be launched with a simple double-click.
 
 *PLEASE NOTE*
 At this time, there is a known issue with pyAMP on Windows in which fldigi will not transmit text that is manually entered into the transmit pane while pyAMP is connected.  This bug also prevents fldigi from transmitting data from flamp while pyAMP is connected.
